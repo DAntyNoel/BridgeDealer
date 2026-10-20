@@ -1,0 +1,38 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "bridge-dealer"
+version = "0.1.0"
+description = "Reproducible conditional bridge deals and exhaustive CP-SAT enumeration"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10,<3.14"
+dependencies = [
+    "endplay==0.5.12",
+    "ortools==9.15.6755",
+]
+
+[project.scripts]
+bridge-dealer = "bridge_dealer.cli:main"
+
+[project.urls]
+Repository = "https://github.com/DAntyNoel/BridgeDealer"
+Issues = "https://github.com/DAntyNoel/BridgeDealer/issues"
+
+[dependency-groups]
+dev = ["pytest>=8.3,<10", "ruff>=0.9,<1"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/bridge_dealer"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]

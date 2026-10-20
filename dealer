@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+project_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if [ ! -x "$project_dir/.venv/bin/python" ]; then
+    printf '%s\n' '请先在项目目录运行 uv sync --locked --python 3.12' >&2
+    exit 2
+fi
+export MPLCONFIGDIR="${MPLCONFIGDIR:-$project_dir/.cache/matplotlib}"
+export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$project_dir/.cache}"
+exec "$project_dir/.venv/bin/python" -m bridge_dealer "$@"
