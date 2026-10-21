@@ -19,6 +19,12 @@ def solve(solver, batch, request):
     )
 
 
+def checkpoint_batch_size(request, samples, size):
+    """Finish a batch at the display target before continuing larger batches."""
+    target = request["min_samples"]
+    return min(size, target - samples) if samples < target else size
+
+
 def run_exact(request, conditions, state, emit):
     """Unbounded streamed census. Completion, not sample count, establishes truth."""
     state["method"] = "enumeration"
@@ -30,7 +36,8 @@ def run_exact(request, conditions, state, emit):
     if plan is not None:
         state["population_size"] = plan.total_deals
     emit()
-    batch, batch_size = [], 40
+    batch = []
+    batch_size = checkpoint_batch_size(request, 0, 40)
     with DDSContextPool(request.get("dds_library"), threads=request["threads"]) as solver:
         state.update(
             dds_version=solver.version,
@@ -39,6 +46,7 @@ def run_exact(request, conditions, state, emit):
         )
 
         def flush():
+            nonlocal batch_size
             if not batch:
                 return
             emit()
@@ -49,6 +57,7 @@ def run_exact(request, conditions, state, emit):
                 for i, success in enumerate(outcome):
                     state["successes"][i] += success
             state["samples"] += len(batch)
+            batch_size = checkpoint_batch_size(request, state["samples"], 40)
             batch.clear()
             emit()
 
@@ -152,6 +161,7 @@ def main():
                 if remaining < seconds_per_deal * 1.3:
                     break
             batch_size = min(batch_size, max_samples - state["samples"])
+            batch_size = checkpoint_batch_size(request, state["samples"], batch_size)
             started = perf_counter()
             if exact is not None:
                 batch = exact[state["samples"] : state["samples"] + batch_size]

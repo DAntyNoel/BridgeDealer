@@ -110,8 +110,8 @@ def test_cancellation_interrupts_unlimited_query_without_false_truth():
 
 
 @pytest.fixture
-def server():
-    http = WorkbenchServer(("127.0.0.1", 0))
+def server(tmp_path):
+    http = WorkbenchServer(("127.0.0.1", 0), templates_path=tmp_path / "templates.json")
     thread = threading.Thread(target=http.serve_forever, daemon=True)
     thread.start()
     yield f"http://127.0.0.1:{http.server_port}"
@@ -179,6 +179,42 @@ def test_http_cancel_busy_and_infeasible(server):
     )
     assert code == 202
     assert wait_job(server, data["id"])["result"]["status"] == "infeasible"
+
+
+def test_http_local_templates_create_update_reopen_and_delete(server, tmp_path):
+    from bridge_dealer.templates import HandTemplates
+
+    assert request(server, "/api/hand-templates")[1] == {"templates": []}
+    raw = {"name": "均型 15–17", "condition": {"hcp": [15, 17], "shape_any": [4, 3, 3, 3]}}
+    code, data = request(server, "/api/hand-templates", raw)
+    assert code == 201
+    entry = data["template"]
+    assert len(entry["condition"]["shapes"]) == 4
+    assert HandTemplates(tmp_path / "templates.json").list() == [entry]
+    assert request(server, "/api/hand-templates", raw)[0] == 409
+    raw["name"] = "改名后的均型"
+    assert request(server, "/api/hand-templates/" + entry["id"], raw)[0] == 200
+    assert request(server, "/api/hand-templates")[1]["templates"][0]["name"] == raw["name"]
+    assert (
+        request(server, "/api/hand-templates", {"name": "坏牌型", "condition": {"shape": [1, 2]}})[
+            0
+        ]
+        == 400
+    )
+    assert request(server, "/api/hand-templates", raw, "https://example.com")[0] == 403
+    assert request(server, "/api/hand-templates", origin="https://example.com")[0] == 403
+    assert request(server, "/api/hand-templates/missing", raw)[0] == 404
+    assert request(server, "/api/hand-templates/" + entry["id"] + "/delete", {})[0] == 200
+    assert HandTemplates(tmp_path / "templates.json").list() == []
+    assert request(server, "/api/hand-templates/" + entry["id"] + "/delete", {})[0] == 404
+
+
+def test_http_template_storage_failure_is_reported_without_data_loss(server, tmp_path):
+    path = tmp_path / "templates.json"
+    path.write_text("{broken")
+    assert request(server, "/api/hand-templates")[0] == 500
+    assert request(server, "/api/hand-templates", {"name": "新模板", "condition": {}})[0] == 500
+    assert path.read_text() == "{broken"
 
 
 @pytest.mark.parametrize(

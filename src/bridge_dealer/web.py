@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 
 from .conditions import Conditions
 from .success import normalize_contracts, query_success
+from .templates import DEFAULT_TEMPLATE_PATH, HandTemplates, TemplateConflict
 
 STATIC = Path(__file__).with_name("static")
 DEFAULT_CONTRACTS = [{"declarer": "N", "level": 3, "strain": s} for s in ("S", "H", "D", "C", "NT")]
@@ -84,7 +85,9 @@ class Jobs:
 
             def progress(value):
                 with self.lock:
-                    job["progress"] = value
+                    job["progress"] = {k: v for k, v in value.items() if k != "result"}
+                    if "result" in value:
+                        job["result"] = value["result"]
 
             def run():
                 try:
@@ -99,6 +102,19 @@ class Jobs:
                 except Exception as error:
                     with self.lock:
                         job.update(state="error", error=str(error))
+                        # A previously published prefix remains useful, but it is final now.
+                        if "result" in job:
+                            job["result"] = {
+                                **job["result"],
+                                "status": "error",
+                                "running": False,
+                                "stop_reason": "worker_error",
+                                "errors": [str(error)],
+                                "results": [
+                                    {**item, "probability": None, "interval": None}
+                                    for item in job["result"]["results"]
+                                ],
+                            }
 
             self.worker = threading.Thread(target=run, daemon=True)
             self.worker.start()
@@ -128,8 +144,9 @@ class Jobs:
 class WorkbenchServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, address):
+    def __init__(self, address, *, templates_path=DEFAULT_TEMPLATE_PATH):
         self.jobs = Jobs()
+        self.templates = HandTemplates(templates_path)
         super().__init__(address, Handler)
 
     def server_close(self):
@@ -161,6 +178,11 @@ class Handler(BaseHTTPRequestHandler):
         if not self.same_origin():
             return self.respond(403, {"error": "Only local same-origin requests are allowed"})
         path = urlsplit(self.path).path
+        if path == "/api/hand-templates":
+            try:
+                return self.respond(200, {"templates": self.server.templates.list()})
+            except OSError as error:
+                return self.respond(500, {"error": f"无法读取本地模板：{error}"})
         if path == "/api/jobs":
             with self.server.jobs.lock:
                 active = next(
@@ -202,20 +224,34 @@ class Handler(BaseHTTPRequestHandler):
             if path.startswith("/api/jobs/") and path.endswith("/cancel"):
                 self.server.jobs.cancel(path.split("/")[3])
                 return self.respond(202, {"state": "cancelling"})
-            if path != "/api/jobs":
+            parts = path.strip("/").split("/")
+            template_route = parts[:2] == ["api", "hand-templates"] and (
+                len(parts) in (2, 3) or len(parts) == 4 and parts[3] == "delete"
+            )
+            if path != "/api/jobs" and not template_route:
                 return self.respond(404, {"error": "Not found"})
             length = int(self.headers.get("Content-Length", "0"))
             if not 0 < length <= 131072:
                 raise ValueError("Request must be a JSON object no larger than 128 KB")
             raw = json.loads(self.rfile.read(length))
+            if template_route:
+                if len(parts) == 4:
+                    self.server.templates.delete(parts[2])
+                    return self.respond(200, {"deleted": True})
+                entry = self.server.templates.save(raw, parts[2] if len(parts) == 3 else None)
+                return self.respond(201 if len(parts) == 2 else 200, {"template": entry})
             identity = self.server.jobs.start(raw)
             self.respond(202, {"id": identity})
+        except TemplateConflict as error:
+            self.respond(409, {"error": str(error)})
         except (ValueError, TypeError) as error:
             self.respond(400, {"error": str(error)})
         except KeyError:
-            self.respond(404, {"error": "解析任务不存在"})
+            self.respond(404, {"error": "模板或解析任务不存在"})
         except RuntimeError as error:
             self.respond(409, {"error": str(error)})
+        except OSError as error:
+            self.respond(500, {"error": f"无法保存本地模板：{error}"})
 
 
 def serve(port=8789):

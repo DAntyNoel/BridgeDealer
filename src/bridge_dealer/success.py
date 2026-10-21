@@ -111,6 +111,10 @@ def query_success(
     Native calls run in a disposable subprocess. Parent reserves time for killing
     a straggling solve, draining checkpoints and formatting the result. OS-level
     scheduling and caller-side display/file I/O are outside real-time control.
+    on_progress receives worker checkpoints as they arrive. Once min_samples
+    is reached, completed batches include a complete result snapshot. Running
+    census snapshots contain bounds and are never labelled exact before
+    exhaustion. Consumers choose how often to read and display these results.
     """
     start = perf_counter() if _started_at is None else _started_at
     if type(exact) is not bool:
@@ -188,6 +192,7 @@ def query_success(
         "seed": seed,
         "threads": threads,
         "max_samples": max_samples,
+        "min_samples": min_samples,
         "dds_library": str(dds_library) if dds_library else None,
         "deadline": None if exact else kill_at - min(0.12, budget_seconds * 0.03),
         "exact": exact,
@@ -205,6 +210,106 @@ def query_success(
         "dds_seconds": 0.0,
     }
     stopped, errors, terminated = "time_budget", [], False
+
+    def result_snapshot(stopped, *, running=False):
+        samples = state["samples"]
+        is_exact = state["method"] == "enumeration" and stopped == "exhausted"
+        if running:
+            status = "running"
+        elif errors:
+            status = "error"
+        elif stopped == "cancelled":
+            status = "cancelled"
+        elif stopped == "infeasible":
+            status = "infeasible"
+        elif is_exact:
+            status = "exact"
+        elif samples < min_samples:
+            status = "insufficient_samples"
+        else:
+            status = "estimated"
+        results = []
+        for contract, index in zip(requested, indices):
+            successes = state["successes"][index]
+            if status in ("infeasible", "error"):
+                probability, interval = None, None
+            elif is_exact:
+                probability = successes / samples
+                interval = [probability, probability]
+            elif state["method"] == "enumeration":
+                # A deterministic census prefix is not an iid random sample.
+                population = state["population_size"]
+                probability = None
+                interval = (
+                    [successes / population, (successes + population - samples) / population]
+                    if population
+                    else [0.0, 1.0]
+                )
+            else:
+                probability = successes / samples if samples else None
+                interval = confidence_sequence(successes, samples, (1 - confidence) / solve_count)
+            results.append(
+                {
+                    **contract,
+                    "required_tricks": contract["level"] + 6,
+                    "successes": successes,
+                    "samples": samples,
+                    "probability": probability,
+                    "interval": interval,
+                }
+            )
+        result = {
+            "status": status,
+            "running": running,
+            "stop_reason": stopped,
+            "budget_seconds": budget_seconds,
+            "seed": seed,
+            "max_samples": None if exact else max_samples,
+            "query_mode": "exact" if exact else "estimate",
+            "min_samples": min_samples,
+            "method": state["method"],
+            "population_size": state["population_size"],
+            "strategy": state.get("strategy"),
+            "samples": samples,
+            "suit_symmetry": suit_symmetry,
+            "solved_strains": list(dict.fromkeys(c[2] for c in solved_contracts))
+            if contracts is not None
+            else list(solved_strains),
+            "strain_representatives": contract_reps if contracts is not None else representatives,
+            "same_deals_across_strains": all(
+                c["strain"] == solved_contracts[i][2] for c, i in zip(requested, indices)
+            )
+            if contracts is not None
+            else len(solved_strains) == len(strains),
+            "dds_positions": samples * solve_count,
+            "requested_contracts": requested,
+            "solved_contracts": solved_contracts if contracts is not None else None,
+            "generated": state["generated"],
+            "unresolved": state["generated"] - samples,
+            "proposed": state["proposed"],
+            "worker_terminated": terminated,
+            "sampling_seconds": state["sampling_seconds"],
+            "dds_seconds": state["dds_seconds"],
+            "dds_version": state.get("dds_version"),
+            "dds_library": state.get("dds_library"),
+            "dds_engine": state.get("dds_engine"),
+            "inference": "exact"
+            if is_exact
+            else "census_bounds"
+            if state["method"] == "enumeration"
+            else "time_uniform_beta_binomial",
+            "confidence": confidence,
+            "simultaneous_strain_coverage": True,
+            "interpretation": "Conditional double-dummy success under best play by both sides",
+            "conditions_sha256": conditions.fingerprint,
+            "results": results,
+        }
+        if errors:
+            result["errors"] = errors
+        result["elapsed_seconds"] = perf_counter() - start
+        result["within_budget"] = None if exact else result["elapsed_seconds"] <= budget_seconds
+        return result
+
     if exact or perf_counter() < kill_at:
         with tempfile.TemporaryFile(mode="w+b") as source:
             source.write(json.dumps(request).encode())
@@ -224,7 +329,22 @@ def query_success(
                     os.set_blocking(stream.fileno(), False)
                     selector.register(stream, selectors.EVENT_READ, name)
                 done = False
-                last_progress = -math.inf
+                last_result_samples = None
+
+                def publish_progress(*, final=False):
+                    nonlocal last_result_samples
+                    if on_progress is None:
+                        return
+                    now = perf_counter()
+                    ready = state["samples"] >= min_samples
+                    value = {**state, "elapsed_seconds": now - start}
+                    if final or ready and state["samples"] != last_result_samples:
+                        value["result"] = result_snapshot(
+                            stopped if final else "running", running=not final
+                        )
+                        last_result_samples = state["samples"]
+                    on_progress(value)
+
                 while selector.get_map() and not done:
                     if cancel_event is not None and cancel_event.is_set():
                         stopped, terminated = "cancelled", True
@@ -248,17 +368,12 @@ def query_success(
                             line, buffers[name] = buffers[name].split(b"\n", 1)
                             message = json.loads(line)
                             state = message
-                            now = perf_counter()
-                            if on_progress is not None and (
-                                now - last_progress >= 2 or message["type"] in ("done", "error")
-                            ):
-                                on_progress({**message, "elapsed_seconds": now - start})
-                                last_progress = now
                             if message["type"] == "error":
                                 errors.append(message["error"])
                                 stopped, done = "worker_error", True
                             elif message["type"] == "done":
                                 stopped, done = message["stop_reason"], True
+                            publish_progress(final=done)
                 if not done and not terminated:
                     stopped = "worker_error"
                     errors.append("DDS worker exited without a final result")
@@ -279,97 +394,4 @@ def query_success(
                 process.stderr.close()
             if errors and buffers["stderr"]:
                 errors.append(buffers["stderr"].decode(errors="replace"))
-    samples = state["samples"]
-    is_exact = state["method"] == "enumeration" and stopped == "exhausted"
-    if errors:
-        status = "error"
-    elif stopped == "cancelled":
-        status = "cancelled"
-    elif stopped == "infeasible":
-        status = "infeasible"
-    elif is_exact:
-        status = "exact"
-    elif samples < min_samples:
-        status = "insufficient_samples"
-    else:
-        status = "estimated"
-    results = []
-    for contract, index in zip(requested, indices):
-        successes = state["successes"][index]
-        if status in ("infeasible", "error"):
-            probability, interval = None, None
-        elif is_exact:
-            probability = successes / samples
-            interval = [probability, probability]
-        elif state["method"] == "enumeration":
-            # A deterministic census prefix is not an iid random sample.
-            population = state["population_size"]
-            probability = None
-            interval = (
-                [successes / population, (successes + population - samples) / population]
-                if population
-                else [0.0, 1.0]
-            )
-        else:
-            probability = successes / samples if samples else None
-            interval = confidence_sequence(successes, samples, (1 - confidence) / solve_count)
-        results.append(
-            {
-                **contract,
-                "required_tricks": contract["level"] + 6,
-                "successes": successes,
-                "samples": samples,
-                "probability": probability,
-                "interval": interval,
-            }
-        )
-    result = {
-        "status": status,
-        "stop_reason": stopped,
-        "budget_seconds": budget_seconds,
-        "seed": seed,
-        "max_samples": None if exact else max_samples,
-        "query_mode": "exact" if exact else "estimate",
-        "min_samples": min_samples,
-        "method": state["method"],
-        "population_size": state["population_size"],
-        "strategy": state.get("strategy"),
-        "samples": samples,
-        "suit_symmetry": suit_symmetry,
-        "solved_strains": list(dict.fromkeys(c[2] for c in solved_contracts))
-        if contracts is not None
-        else list(solved_strains),
-        "strain_representatives": contract_reps if contracts is not None else representatives,
-        "same_deals_across_strains": all(
-            c["strain"] == solved_contracts[i][2] for c, i in zip(requested, indices)
-        )
-        if contracts is not None
-        else len(solved_strains) == len(strains),
-        "dds_positions": samples * solve_count,
-        "requested_contracts": requested,
-        "solved_contracts": solved_contracts if contracts is not None else None,
-        "generated": state["generated"],
-        "unresolved": state["generated"] - samples,
-        "proposed": state["proposed"],
-        "worker_terminated": terminated,
-        "sampling_seconds": state["sampling_seconds"],
-        "dds_seconds": state["dds_seconds"],
-        "dds_version": state.get("dds_version"),
-        "dds_library": state.get("dds_library"),
-        "dds_engine": state.get("dds_engine"),
-        "inference": "exact"
-        if is_exact
-        else "census_bounds"
-        if state["method"] == "enumeration"
-        else "time_uniform_beta_binomial",
-        "confidence": confidence,
-        "simultaneous_strain_coverage": True,
-        "interpretation": "Conditional double-dummy success under best play by both sides",
-        "conditions_sha256": conditions.fingerprint,
-        "results": results,
-    }
-    if errors:
-        result["errors"] = errors
-    result["elapsed_seconds"] = perf_counter() - start
-    result["within_budget"] = None if exact else result["elapsed_seconds"] <= budget_seconds
-    return result
+    return result_snapshot(stopped)

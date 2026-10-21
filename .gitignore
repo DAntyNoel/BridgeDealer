@@ -9,6 +9,7 @@ __pycache__/
 /dist/
 /lib/
 /artifacts/
+/user_data/
 *.egg-info/
 .env
 .env.*
