@@ -31,12 +31,27 @@ def _unique_object(pairs):
     return result
 
 
+def _public_origin(value):
+    from .web import normalize_public_origin
+
+    try:
+        return normalize_public_origin(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from None
+
+
 def _parser():
     parser = argparse.ArgumentParser(description="条件桥牌发牌：随机抽样与 CP-SAT 全枚举")
     parser.add_argument("--version", action="version", version=__version__)
     commands = parser.add_subparsers(dest="command", required=True)
     web = commands.add_parser("serve", help="启动本地桥牌网页工作台")
     web.add_argument("--port", type=int, default=8789)
+    web.add_argument(
+        "--public-origin",
+        type=_public_origin,
+        metavar="HTTPS_ORIGIN",
+        help="显式允许一个 HTTPS 公网来源；仍只监听 127.0.0.1",
+    )
     for name, help_text in (
         ("random", "按条件随机发牌，支持种子复现"),
         ("enumerate", "不重不漏枚举，流式输出"),
@@ -91,7 +106,7 @@ def main(argv=None) -> int:
     if args.command == "serve":
         from .web import serve
 
-        serve(args.port)
+        serve(args.port, public_origin=args.public_origin)
         return 0
     report = {"mode": args.command, "version": __version__, "count": 0}
     start = PROCESS_STARTED if args.command == "success" else perf_counter()

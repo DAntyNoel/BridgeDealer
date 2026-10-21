@@ -61,6 +61,18 @@ uv run --locked python scripts/build_dds.py
 网页静态资源随项目提供，不依赖外部 CDN；安装完成后日常查询可以离线运行。
 服务监听本机地址；窄屏布局可在同一浏览器的移动视口中使用。
 
+使用 Cloudflare Tunnel 转发时，显式允许唯一的 HTTPS 公网来源，例如：
+
+```bash
+.venv/bin/python -m bridge_dealer serve --port 12707 --public-origin https://bridge.kanami.top
+```
+
+cloudflared 与服务处于同一网络命名空间时，Tunnel 回源填写 `http://127.0.0.1:12707`；
+Windows Docker connector 使用 `http://host.docker.internal:12707`。保留公网 `Host: bridge.kanami.top`，服务仍只监听 `127.0.0.1`。
+省略 `--public-origin` 时只允许本机访问。来源白名单不是用户认证，所有访问者共享解析任务和模板，
+可以查看、取消任务及修改模板；建议先用 Cloudflare Access 限制指定用户再开放。详见[转发说明](docs/web-workbench.md#通过-cloudflare-tunnel-访问)。
+Windows 可使用[本地部署与启动说明](docs/windows-deployment.md)。
+
 构建结果为 `lib/libdds.dylib`（macOS）或 `lib/libdds.so`（Linux/WSL2）。后端自动查找本仓库的 `lib/`。
 也可用 `BRIDGE_DDS_LIBRARY=/absolute/path/to/libdds.so` 或 CLI 的 `--dds-library` 指定 **3.1.0** 库。
 `uv sync` 默认以 editable 模式安装；若将 Python 包单独安装到别处，需显式指定动态库路径。

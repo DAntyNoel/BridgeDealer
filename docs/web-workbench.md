@@ -9,6 +9,23 @@ cd BridgeDealer  # 进入已克隆并安装好的仓库
 服务仅监听本机，页面、字体和脚本不依赖外部 CDN。静态 HTML/CSS/JavaScript 随 Python 包分发。
 先按根目录 README 安装 Python 依赖并运行 `uv run python scripts/build_dds.py` 编译附带的 DDS 3.1.0；位置与命令行后端相同。
 
+## 通过 Cloudflare Tunnel 访问
+
+```bash
+.venv/bin/python -m bridge_dealer serve --port 12707 --public-origin https://bridge.kanami.top
+```
+
+服务仍仅绑定 `127.0.0.1`。将 Tunnel 的公网主机名设为 `bridge.kanami.top`；cloudflared 与服务处于同一网络命名空间时，
+HTTP 回源设为 `http://127.0.0.1:12707`，Windows Docker connector 使用 `http://host.docker.internal:12707`。
+保留公网 `Host`（如需显式覆盖，填写 `bridge.kanami.top`）；Windows 环境详见[部署说明](windows-deployment.md)。
+`--public-origin` 只接受一个 HTTPS 来源，可带根目录尾斜杠，不允许用户名、密码、资源路径、查询或片段。
+默认仍仅允许本机 `Host` 和对应的 HTTP `Origin`；启用后额外允许精确的公网 `Host` 和 HTTPS `Origin`。
+无 `Origin` 的请求仍需通过 `Host` 检查；转发头和 Cloudflare 头不会增加访问权限。
+
+**同源白名单不是用户认证。** 任务列表、任务结果、取消操作和磁盘模板均为服务内全局共享，
+公开访问者可创建、读取、修改或删除相关状态。建议在 Cloudflare Access 为整个域名添加指定用户的访问规则；
+需要独立状态时使用独立的服务实例和模板文件。HTTP 任务响应不会公开本地 DDS 动态库路径。
+
 ## 使用
 
 页面固定在当前视口，不提供页面滚动。点击牌桌上的四家，在牌桌内展开紧凑条件菜单；
@@ -84,7 +101,8 @@ cd BridgeDealer  # 进入已克隆并安装好的仓库
 ## HTTP 接口
 
 服务使用异步任务，单次只接受一个正在运行的解析，避免多个任务争抢资源而破坏预算。
-保留最近 20 次任务；重启服务会清空。仅允许本机 Host 和同源浏览器请求。
+保留最近 20 次任务；重启服务会清空。默认仅允许本机 Host 和同源浏览器请求；
+通过 `--public-origin` 可额外允许一个固定的 HTTPS 公网来源，规则见上文。
 
 `POST /api/jobs`，返回 HTTP 202 和 `{"id":"…"}`：
 
