@@ -1,10 +1,27 @@
 # Windows / WSL2 本地部署
 
-本机使用 `Ubuntu` WSL2，在 Windows 项目目录运行 `start.cmd` 即可启动。
-默认监听 `127.0.0.1:12707`，并允许公网来源 `https://bridge.kanami.top`；窗口中按 Ctrl-C 停止。
-只允许本机访问时运行 `start.cmd -LocalOnly`。
-可通过 `-Distribution Ubuntu -Port 12707 -PublicOrigin https://bridge.kanami.top` 指定参数。
-这些脚本不安装 Windows 服务，也不设置开机自启；Windows 或 WSL 重启后需重新启动。
+本机使用 WSL2，在 Windows 项目目录运行 `start.cmd` 即可启动独立的 Cloudflare connector
+和桥牌服务；窗口中按 Ctrl-C 停止桥牌服务。
+首次运行将 `.env.example` 复制为 `.env`，填入为 BridgeDealer 单独创建的 Tunnel token。
+Windows 部署配置的唯一来源是项目根目录的 `.env`：
+
+| 配置项 | 示例 | 用途 |
+| --- | --- | --- |
+| `LOCAL_SERVER_HOST` | `127.0.0.1` | 仅允许本机监听，不能改为公网地址 |
+| `LOCAL_SERVER_PORT` | `12707` | 桥牌服务端口 |
+| `LOCAL_SERVER_PUBLIC_ORIGIN` | `https://bridge.kanami.top` | 严格校验的公网来源 |
+| `WSL_DISTRIBUTION` | `Ubuntu` | 已安装 Python / DDS 的 WSL 发行版 |
+| `TUNNEL_TOKEN` | 留在本机填写 | BridgeDealer 专用 Tunnel token |
+
+配置文件只接受未加引号的字面量 `KEY=value` 和整行注释；不展开变量、不执行命令。
+启动入口不再接受端口、来源或发行版覆盖参数，也不继承系统环境变量中的同名配置。
+Docker Compose 使用 `env_file` 的 `raw` 格式直接读取同一个 `.env`，需要 Compose 2.30.0 以上版本。
+修改 `.env` 后停止桥牌服务，再运行 `start.cmd`，会将变更应用到服务和 connector。
+不要输出 `docker compose config` 的展开结果，也不要提交 `.env` 或 token。
+
+只允许本机访问时运行 `start.cmd -LocalOnly`，不会启动 connector，也不会允许公网 Host / Origin。
+connector 使用 `unless-stopped` 随 Docker 恢复；桥牌服务不安装 Windows 服务或开机任务，
+Windows 或 WSL 重启后需重新运行 `start.cmd`。
 
 该端口按主项目的配置和文档分配：12700 为 local-server，12701 为其调试备用，
 12702 为 CLIProxy API，12703 为聊天后端，12704 为 Usage Keeper，12705 为 NapCat，
@@ -35,7 +52,7 @@ Windows 启动入口直接调用 Python 模块，避免 Git 自动转换 CRLF �
 
 ## Cloudflare Tunnel
 
-在 Cloudflare 的 **Networking → Tunnels** 选择现有 Tunnel，
+在 Cloudflare 的 **Networking → Tunnels** 选择 `.env` 中 token 对应的 BridgeDealer 专用 Tunnel，
 在 **Routes → Add route → Published application** 添加：
 
 | 字段 | 值 |
@@ -44,14 +61,15 @@ Windows 启动入口直接调用 Python 模块，避免 Git 自动转换 CRLF �
 | Domain | `kanami.top` |
 | Path | 留空 |
 | Service type | `HTTP` |
-| Service URL（现有 Docker connector） | `host.docker.internal:12707` |
+| Service URL（Docker connector） | `host.docker.internal:12707`（端口与 `.env` 一致） |
 | HTTP Host Header | 留空，保留 `bridge.kanami.top` |
 
 Windows 或相同 WSL 环境中的独立 connector 可使用 `http://127.0.0.1:12707`。
 Docker connector 必须验证能通过 `host.docker.internal` 访问 Windows 的 WSL localhost 转发；
 若当前 Docker / WSL 网络模式不支持，应使用同一 Windows 主机上的 connector，
 不能通过绑定 `0.0.0.0` 或改用 WSL 动态 IP 直接暴露服务来绕过。
-本次安装已从现有 `kanami-cliproxy-cloudflared` 的网络命名空间验证该回源地址可访问 API。
+专用 connector 名为 `kanami-bridge-cloudflared`，与 CLIProxy / Usage Keeper 的 connector 分开管理。
+Tunnel 发布路由仍由 Cloudflare 控制台管理；修改本机端口时，也需同步修改控制台回源端口。
 无需安装第二份 DDS、开放路由器端口、使用 WebSocket 或改写 `/api/` 路径。
 
 同源白名单不提供身份认证。当前任务及模板是服务级共享数据，允许的用户可以查看、取消任务及修改模板；

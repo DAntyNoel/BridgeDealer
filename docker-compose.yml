@@ -1,0 +1,21 @@
+name: bridge-dealer
+
+services:
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: kanami-bridge-cloudflared
+    command: tunnel --no-autoupdate --protocol http2 run
+    env_file:
+      - path: .env
+        format: raw
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: local
+      options:
+        max-size: "5m"
+        max-file: "3"
